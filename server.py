@@ -21,6 +21,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http import cookies
 import secrets
 import hashlib
+import traffic_db
+
+# Initialize persistent SQLite traffic database
+traffic_db.init_db()
 
 def load_dotenv(env_path=None):
     if env_path is None:
@@ -95,6 +99,7 @@ state = {
     "host_tx":       0.0,
     "host_rx_bytes": 0,
     "host_tx_bytes": 0,
+    "traffic_stats": traffic_db.get_traffic_summary(),
 
     # Delta-tracking for Proxmox VMs: {vm_id: (netin_bytes, netout_bytes, timestamp)}
     "_vm_prev":    {},
@@ -144,27 +149,30 @@ def pve_get(path):
         return json.loads(r.read())["data"]
 
 def _calc_speed(vm_id, raw_rx, raw_tx, now):
-    """Return (rx_kbps, tx_kbps) using byte-delta / elapsed, update prev."""
+    """Return (rx_kbps, tx_kbps, delta_rx, delta_tx) using byte-delta / elapsed, update prev."""
     with _lock:
         prev = state["_vm_prev"].get(vm_id)
 
     if prev is None:
         with _lock:
             state["_vm_prev"][vm_id] = (raw_rx, raw_tx, now)
-        return 0.0, 0.0
+        return 0.0, 0.0, 0, 0
 
     p_rx, p_tx, p_ts = prev
     elapsed = now - p_ts
     if elapsed <= 0:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0, 0
 
-    rx_kbps = max(0.0, (raw_rx - p_rx) / elapsed / 1024)
-    tx_kbps = max(0.0, (raw_tx - p_tx) / elapsed / 1024)
+    d_rx = raw_rx - p_rx if raw_rx >= p_rx else raw_rx
+    d_tx = raw_tx - p_tx if raw_tx >= p_tx else raw_tx
+
+    rx_kbps = max(0.0, d_rx / elapsed / 1024)
+    tx_kbps = max(0.0, d_tx / elapsed / 1024)
 
     with _lock:
         state["_vm_prev"][vm_id] = (raw_rx, raw_tx, now)
 
-    return round(rx_kbps, 1), round(tx_kbps, 1)
+    return round(rx_kbps, 1), round(tx_kbps, 1), int(d_rx), int(d_tx)
 
 
 def _get_qemu_ip(nn, vmid):
@@ -210,6 +218,11 @@ def fetch_pve_vms():
         pve_ips = set()   # collect all known VM IPs for gateway dedup
         total_pve_rx = 0
         total_pve_tx = 0
+        batch_delta_rx = 0
+        batch_delta_tx = 0
+
+        with _lock:
+            had_prev = bool(state["_vm_prev"])
 
         for node in nodes:
             nn = node["node"]
@@ -222,7 +235,9 @@ def fetch_pve_vms():
                     raw_tx  = int(vm.get("netout", 0))
                     total_pve_rx += raw_rx
                     total_pve_tx += raw_tx
-                    rx, tx  = _calc_speed(vid, raw_rx, raw_tx, now)
+                    rx, tx, d_rx, d_tx = _calc_speed(vid, raw_rx, raw_tx, now)
+                    batch_delta_rx += d_rx
+                    batch_delta_tx += d_tx
                     
                     ip = _vm_ip_cache.get(vid)
                     if not ip and vm.get("status") == "running":
@@ -257,7 +272,9 @@ def fetch_pve_vms():
                     raw_tx = int(ct.get("netout", 0))
                     total_pve_rx += raw_rx
                     total_pve_tx += raw_tx
-                    rx, tx = _calc_speed(vid, raw_rx, raw_tx, now)
+                    rx, tx, d_rx, d_tx = _calc_speed(vid, raw_rx, raw_tx, now)
+                    batch_delta_rx += d_rx
+                    batch_delta_tx += d_tx
                     
                     ip = _vm_ip_cache.get(vid)
                     if not ip and ct.get("status") == "running":
@@ -283,12 +300,23 @@ def fetch_pve_vms():
             except Exception as e:
                 print(f"[PVE] LXC err: {e}")
 
+        # Update persistent traffic stats in SQLite
+        if not had_prev:
+            traffic_db.seed_initial_if_empty(total_pve_rx, total_pve_tx)
+        elif batch_delta_rx > 0 or batch_delta_tx > 0:
+            traffic_db.record_delta(batch_delta_rx, batch_delta_tx)
+
+        stats = traffic_db.get_traffic_summary()
+
         with _lock:
-            state["vms"]       = vms
-            state["pve_ips"]   = list(pve_ips)
-            state["pve_error"] = None
+            state["vms"]          = vms
+            state["pve_ips"]      = list(pve_ips)
+            state["pve_error"]    = None
             state["pve_rx_bytes"] = total_pve_rx
             state["pve_tx_bytes"] = total_pve_tx
+            state["host_rx_bytes"] = stats["all"]["rx"]
+            state["host_tx_bytes"] = stats["all"]["tx"]
+            state["traffic_stats"] = stats
         print(f"[PVE] {len(vms)} VMs refreshed, IPs: {list(pve_ips)}")
 
     except Exception as e:
@@ -323,10 +351,6 @@ def get_host_nic_speeds():
                 total_tx = max(0, tx_b - p_tx) / elapsed / 1024
 
         _nic_prev["all"] = (rx_b, tx_b, now)
-
-        with _lock:
-            state["host_rx_bytes"] = rx_b
-            state["host_tx_bytes"] = tx_b
 
         return round(total_rx, 1), round(total_tx, 1)
 
@@ -497,6 +521,7 @@ def _build_payload():
             "hostTx":      state["host_tx"],
             "hostRxBytes": state["host_rx_bytes"],
             "hostTxBytes": state["host_tx_bytes"],
+            "trafficStats": state.get("traffic_stats", {}),
             "layout":      state.get("layout", {}),
         }
 
@@ -795,6 +820,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.serve_json()
             elif path == "/api/layout":
                 self.serve_layout()
+            elif path == "/api/traffic/stats":
+                self.serve_traffic_stats()
+            elif path == "/api/traffic/history":
+                self.serve_traffic_history()
             elif path in ("/", "/index.html"):
                 self.serve_static("index.html", "text/html; charset=utf-8")
             else:
@@ -1178,6 +1207,28 @@ class Handler(BaseHTTPRequestHandler):
     def serve_json(self):
         payload = _build_payload()
         body    = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type",   "application/json")
+        self.send_header("Content-Length", len(body))
+        self.send_header("Cache-Control",  "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_traffic_stats(self):
+        stats = traffic_db.get_traffic_summary()
+        body = json.dumps({"ok": True, "stats": stats}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type",   "application/json")
+        self.send_header("Content-Length", len(body))
+        self.send_header("Cache-Control",  "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_traffic_history(self):
+        history = traffic_db.get_daily_history(30)
+        body = json.dumps({"ok": True, "history": history}).encode()
         self.send_response(200)
         self.send_header("Content-Type",   "application/json")
         self.send_header("Content-Length", len(body))

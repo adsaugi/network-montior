@@ -155,8 +155,17 @@ body::before {
   <div class="sitem">
     <div><div class="sval live" id="st-ul" style="color:#f472b6">0 Mbps</div><div class="slbl">WAN TX</div></div>
   </div>
-  <div class="sitem">
-    <div><div class="sval live" id="st-total">0 B / 0 B</div><div class="slbl">USAGE (RX/TX)</div></div>
+  <div class="sitem cursor-pointer" id="traffic-card" onclick="openTrafficModal()" title="Klik untuk rincian & ganti periode (Hari / Minggu / Bulan / Total)">
+    <div>
+      <div style="display:flex; align-items:center; gap:6px;">
+        <span class="sval live" id="st-total" style="color:#67e8f9">0 B / 0 B</span>
+        <span id="traffic-badge" class="traffic-badge">HARI INI</span>
+      </div>
+      <div class="slbl" id="st-total-lbl" style="display:flex; align-items:center; gap:4px;">
+        <span>USAGE (RX/TX)</span>
+        <span style="font-size:9px; color:#67e8f9; opacity:0.8;">[DETAIL 📊]</span>
+      </div>
+    </div>
   </div>
   <div class="sitem">
     <div><div class="sval live" id="st-lag" style="color:#fbbf24">—</div><div class="slbl">SYNC DELAY</div></div>
@@ -181,6 +190,100 @@ body::before {
 <div id="fps-badge">— FPS</div>
 
 <div id="toast-container"></div>
+
+<!-- Traffic Breakdown Modal -->
+<div id="traffic-modal" class="traffic-modal-backdrop" onclick="if(event.target===this) closeTrafficModal()">
+  <div class="traffic-modal-content">
+    <div class="traffic-modal-header">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <span style="font-size:18px;">📊</span>
+        <div>
+          <div style="font-size:14px; font-weight:700; color:#67e8f9; letter-spacing:1px;">BANDWIDTH USAGE & HISTORICAL RECORD</div>
+          <div style="font-size:10px; color:var(--muted);">Tersimpan permanen di SQLite (Aman dari reboot server/VM)</div>
+        </div>
+      </div>
+      <button class="traffic-close-btn" onclick="closeTrafficModal()">✕</button>
+    </div>
+
+    <!-- Active View Switcher for Header -->
+    <div style="margin:14px 20px 10px 20px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+      <span style="font-size:11px; color:var(--muted); text-transform:uppercase; font-weight:600;">Tampilan Top Bar:</span>
+      <div class="traffic-period-pills" id="traffic-period-pills">
+        <button class="traffic-pill active" data-period="today" onclick="setTrafficPeriod('today')">HARI INI</button>
+        <button class="traffic-pill" data-period="week" onclick="setTrafficPeriod('week')">7 HARI (MINGGU)</button>
+        <button class="traffic-pill" data-period="month" onclick="setTrafficPeriod('month')">BULAN INI</button>
+        <button class="traffic-pill" data-period="all" onclick="setTrafficPeriod('all')">ALL-TIME</button>
+      </div>
+    </div>
+
+    <!-- Summary Cards Grid -->
+    <div class="traffic-grid">
+      <div class="traffic-card" id="card-today">
+        <div class="traffic-card-title">📅 HARI INI</div>
+        <div class="traffic-card-total" id="tm-today-total">0 B</div>
+        <div class="traffic-card-sub">
+          <span style="color:#34d399">RX: <b id="tm-today-rx">0 B</b></span>
+          <span style="color:#f472b6">TX: <b id="tm-today-tx">0 B</b></span>
+        </div>
+      </div>
+      <div class="traffic-card" id="card-week">
+        <div class="traffic-card-title">📆 7 HARI TERAKHIR</div>
+        <div class="traffic-card-total" id="tm-week-total">0 B</div>
+        <div class="traffic-card-sub">
+          <span style="color:#34d399">RX: <b id="tm-week-rx">0 B</b></span>
+          <span style="color:#f472b6">TX: <b id="tm-week-tx">0 B</b></span>
+        </div>
+      </div>
+      <div class="traffic-card" id="card-month">
+        <div class="traffic-card-title">🗓️ BULAN INI</div>
+        <div class="traffic-card-total" id="tm-month-total">0 B</div>
+        <div class="traffic-card-sub">
+          <span style="color:#34d399">RX: <b id="tm-month-rx">0 B</b></span>
+          <span style="color:#f472b6">TX: <b id="tm-month-tx">0 B</b></span>
+        </div>
+      </div>
+      <div class="traffic-card" id="card-all">
+        <div class="traffic-card-title">♾️ ALL-TIME TOTAL</div>
+        <div class="traffic-card-total" id="tm-all-total">0 B</div>
+        <div class="traffic-card-sub">
+          <span style="color:#34d399">RX: <b id="tm-all-rx">0 B</b></span>
+          <span style="color:#f472b6">TX: <b id="tm-all-tx">0 B</b></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 30-Day Daily Breakdown Table -->
+    <div style="margin-top:16px;">
+      <div style="font-size:11px; font-weight:700; color:var(--text); margin:0 20px 8px 20px; text-transform:uppercase; letter-spacing:0.5px; display:flex; justify-content:space-between;">
+        <span>RIWAYAT HARIAN (30 HARI TERAKHIR)</span>
+        <span id="tm-history-status" style="color:var(--muted); font-size:10px;">Sinkron...</span>
+      </div>
+      <div class="traffic-table-wrap">
+        <table class="traffic-table">
+          <thead>
+            <tr>
+              <th>TANGGAL</th>
+              <th>DOWNLOAD (RX)</th>
+              <th>UPLOAD (TX)</th>
+              <th>TOTAL USAGE</th>
+              <th style="width:30%;">DISTRIBUSI</th>
+            </tr>
+          </thead>
+          <tbody id="tm-history-tbody">
+            <tr><td colspan="5" style="text-align:center; padding:15px; color:var(--muted);">Memuat riwayat...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="traffic-modal-footer">
+      <div style="font-size:10px; color:var(--muted);">
+        * Data dicatat otomatis ke SQLite (<code style="color:#67e8f9;">traffic.db</code>).
+      </div>
+      <button class="traffic-btn-secondary" onclick="closeTrafficModal()">Tutup</button>
+    </div>
+  </div>
+</div>
 
 <script>
 // ═══════════════════════════════════════════════════════════════════
@@ -548,6 +651,134 @@ function fmtBytes(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
+let currentTrafficStats = null;
+let currentTrafficPeriod = localStorage.getItem('traffic_period') || 'today';
+
+const trafficPeriodLabels = {
+  'today': 'HARI INI',
+  'week':  '7 HARI',
+  'month': 'BULAN INI',
+  'all':   'ALL-TIME'
+};
+
+function setTrafficPeriod(period) {
+  currentTrafficPeriod = period;
+  localStorage.setItem('traffic_period', period);
+  document.querySelectorAll('.traffic-pill').forEach(btn => {
+    btn.classList.toggle('active', btn.getAttribute('data-period') === period);
+  });
+  const badge = document.getElementById('traffic-badge');
+  if (badge) badge.textContent = trafficPeriodLabels[period] || 'HARI INI';
+  if (currentTrafficStats) {
+    applyTrafficView(currentTrafficStats);
+  }
+}
+
+function applyTrafficView(stats) {
+  if (!stats) return;
+  const p = stats[currentTrafficPeriod] || stats.today || stats.all;
+  if (p) {
+    const rxStr = fmtBytes(p.rx || 0);
+    const txStr = fmtBytes(p.tx || 0);
+    const el = document.getElementById('st-total');
+    if (el) el.textContent = `${rxStr} / ${txStr}`;
+  }
+  if (stats.today) {
+    const elTot = document.getElementById('tm-today-total');
+    const elRx  = document.getElementById('tm-today-rx');
+    const elTx  = document.getElementById('tm-today-tx');
+    if (elTot) elTot.textContent = fmtBytes(stats.today.total);
+    if (elRx)  elRx.textContent  = fmtBytes(stats.today.rx);
+    if (elTx)  elTx.textContent  = fmtBytes(stats.today.tx);
+  }
+  if (stats.week) {
+    const elTot = document.getElementById('tm-week-total');
+    const elRx  = document.getElementById('tm-week-rx');
+    const elTx  = document.getElementById('tm-week-tx');
+    if (elTot) elTot.textContent = fmtBytes(stats.week.total);
+    if (elRx)  elRx.textContent  = fmtBytes(stats.week.rx);
+    if (elTx)  elTx.textContent  = fmtBytes(stats.week.tx);
+  }
+  if (stats.month) {
+    const elTot = document.getElementById('tm-month-total');
+    const elRx  = document.getElementById('tm-month-rx');
+    const elTx  = document.getElementById('tm-month-tx');
+    if (elTot) elTot.textContent = fmtBytes(stats.month.total);
+    if (elRx)  elRx.textContent  = fmtBytes(stats.month.rx);
+    if (elTx)  elTx.textContent  = fmtBytes(stats.month.tx);
+  }
+  if (stats.all) {
+    const elTot = document.getElementById('tm-all-total');
+    const elRx  = document.getElementById('tm-all-rx');
+    const elTx  = document.getElementById('tm-all-tx');
+    if (elTot) elTot.textContent = fmtBytes(stats.all.total);
+    if (elRx)  elRx.textContent  = fmtBytes(stats.all.rx);
+    if (elTx)  elTx.textContent  = fmtBytes(stats.all.tx);
+  }
+}
+
+function openTrafficModal() {
+  const modal = document.getElementById('traffic-modal');
+  if (modal) modal.classList.add('open');
+  loadTrafficHistory();
+}
+
+function closeTrafficModal() {
+  const modal = document.getElementById('traffic-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+function loadTrafficHistory() {
+  const statusEl = document.getElementById('tm-history-status');
+  if (statusEl) statusEl.textContent = 'Memuat...';
+  fetch('/api/traffic/history')
+    .then(r => r.json())
+    .then(data => {
+      if (statusEl) statusEl.textContent = 'Live Synced';
+      if (data && data.history) {
+        renderTrafficHistoryTable(data.history);
+      }
+    })
+    .catch(() => {
+      if (statusEl) statusEl.textContent = 'Offline';
+    });
+}
+
+function renderTrafficHistoryTable(history) {
+  const tbody = document.getElementById('tm-history-tbody');
+  if (!tbody) return;
+  if (!history || history.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:15px; color:var(--muted);">Belum ada catatan riwayat traffic.</td></tr>';
+    return;
+  }
+  let maxTotal = 1;
+  history.forEach(h => { if (h.total > maxTotal) maxTotal = h.total; });
+  
+  tbody.innerHTML = history.map(h => {
+    const rxPct = Math.round((h.rx / (h.total || 1)) * 100);
+    const txPct = 100 - rxPct;
+    const barWidth = Math.max(5, Math.round((h.total / maxTotal) * 100));
+    return `
+      <tr>
+        <td style="font-weight:600; color:#67e8f9;">${h.date}</td>
+        <td style="color:#34d399;">${fmtBytes(h.rx)}</td>
+        <td style="color:#f472b6;">${fmtBytes(h.tx)}</td>
+        <td style="font-weight:700;">${fmtBytes(h.total)}</td>
+        <td>
+          <div style="background:rgba(255,255,255,0.08); border-radius:4px; height:8px; width:100%; overflow:hidden; display:flex;">
+            <div style="background:#34d399; width:${(rxPct * barWidth) / 100}%;" title="RX: ${rxPct}%"></div>
+            <div style="background:#f472b6; width:${(txPct * barWidth) / 100}%;" title="TX: ${txPct}%"></div>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeTrafficModal();
+});
+
 function updateStats(data) {
   const vms = nodes.filter(n => n.parent === 'proxmox');
   const clients = nodes.filter(n => n.parent === 'router' && n.id !== 'proxmox');
@@ -555,7 +786,12 @@ function updateStats(data) {
   document.getElementById('st-clients').textContent = clients.length;
   document.getElementById('st-dl').textContent = fmtSpeed(data.hostRx || 0);
   document.getElementById('st-ul').textContent = fmtSpeed(data.hostTx || 0);
-  document.getElementById('st-total').textContent = `${fmtBytes(data.hostRxBytes||0)} / ${fmtBytes(data.hostTxBytes||0)}`;
+  if (data.trafficStats) {
+    currentTrafficStats = data.trafficStats;
+    applyTrafficView(data.trafficStats);
+  } else {
+    document.getElementById('st-total').textContent = `${fmtBytes(data.hostRxBytes||0)} / ${fmtBytes(data.hostTxBytes||0)}`;
+  }
   document.getElementById('st-lag').textContent = data.ts ? ((Date.now()/1000 - data.ts)).toFixed(1) + 's' : '—';
 }
 
@@ -1126,6 +1362,7 @@ function fetchSnapshot() {
 function init() {
   const savedTheme = localStorage.getItem('theme') || 'dark';
   applyTheme(savedTheme);
+  setTrafficPeriod(currentTrafficPeriod);
   resize();
   nodes = DEFAULTS.map(d => ({ ...d, rx:0, tx:0, tRx:0, tTx:0, w:180, h:60 }));
   _lastNodeIds = nodes.map(n => n.id).sort().join(',');

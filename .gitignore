@@ -17,6 +17,11 @@ crash.log
 crash.log.tmp
 server.log
 .locked_ips.json
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+traffic.db
 
 # Backups & Editor configs
 *.bak

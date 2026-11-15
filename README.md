@@ -47,6 +47,13 @@ Project ini dibangun untuk memberikan visibilitas penuh atas ekosistem homelab d
   - Menghitung delta transfer data aktual (KB/s upload/download) per interface dan VM.
   - Grafik mini sparkline real-time saat hover node.
 
+- 📊 **Persistent Bandwidth & Historical Traffic (SQLite WAL)**:
+  - Menyimpan total pemakaian bandwidth secara permanen di database lokal SQLite (`traffic.db`).
+  - **Aman dari Reboot**: Data penggunaan tidak hilang saat server, host Proxmox, VM, atau dashboard di-restart berkat delta-tracking logic.
+  - **Filter Waktu Dinamis**: Pantau pemakaian **Hari Ini (Today)**, **7 Hari (Week)**, **Bulan Ini (Month)**, atau **Sepanjang Waktu (All-Time)** langsung dari top bar.
+  - **Breakdown Modal & Visualizer**: Klik widget USAGE di header untuk membuka rincian statistik komprehensif dan tabel riwayat pemakaian harian 30 hari terakhir dengan visualisasi rasio RX/TX.
+  - Endpoint API baru: `/api/traffic/stats` & `/api/traffic/history`.
+
 - 🖥️ **Integrasi Penuh Proxmox VE API**:
   - Auto-discovery VM QEMU dan Container LXC langsung dari cluster Proxmox.
   - Membaca statistik network interface (`netin`/`netout`), memory, CPU, dan status aktif.
@@ -278,6 +285,8 @@ Gunakan utility CLI `unlock_ip.py` dari terminal server:
 | `/api/stream` | `GET` | Sesi Login | **Server-Sent Events (SSE)** data metrik real-time setiap 1 detik. |
 | `/api/data` | `GET` | Sesi Login | Snapshot JSON data topologi (on-demand). |
 | `/api/layout` | `GET/POST`| Sesi Login | Mengambil atau menyimpan koordinat custom posisi node. |
+| `/api/traffic/stats` | `GET` | Sesi Login | Ringkasan akumulasi traffic (Hari ini, 7 hari, Bulan ini, All-time). |
+| `/api/traffic/history`| `GET` | Sesi Login | Riwayat breakdown harian pemakaian bandwidth (30 hari terakhir). |
 
 ---
 
@@ -288,6 +297,8 @@ tailscale-dashboard/
 ├── app.js                 # Engine frontend canvas renderer, dragging, panning & visualizer
 ├── index.html             # UI utama dashboard topologi
 ├── style.css              # Styling CSS tema cyberpunk dark & light
+├── traffic_db.py          # Modul manajemen database SQLite persistensi bandwidth
+├── traffic.db             # File database SQLite lokal (auto-created saat server running)
 ├── server.py              # Server backend HTTP + SSE streamer + Proxmox/Tailscale aggregator
 ├── layout.json            # File persistensi koordinat tata letak node
 ├── topology_login.html    # Form login master key & input OTP Telegram (cyber neon)

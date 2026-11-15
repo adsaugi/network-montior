@@ -266,6 +266,134 @@ function fmtBytes(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
+let currentTrafficStats = null;
+let currentTrafficPeriod = localStorage.getItem('traffic_period') || 'today';
+
+const trafficPeriodLabels = {
+  'today': 'HARI INI',
+  'week':  '7 HARI',
+  'month': 'BULAN INI',
+  'all':   'ALL-TIME'
+};
+
+function setTrafficPeriod(period) {
+  currentTrafficPeriod = period;
+  localStorage.setItem('traffic_period', period);
+  document.querySelectorAll('.traffic-pill').forEach(btn => {
+    btn.classList.toggle('active', btn.getAttribute('data-period') === period);
+  });
+  const badge = document.getElementById('traffic-badge');
+  if (badge) badge.textContent = trafficPeriodLabels[period] || 'HARI INI';
+  if (currentTrafficStats) {
+    applyTrafficView(currentTrafficStats);
+  }
+}
+
+function applyTrafficView(stats) {
+  if (!stats) return;
+  const p = stats[currentTrafficPeriod] || stats.today || stats.all;
+  if (p) {
+    const rxStr = fmtBytes(p.rx || 0);
+    const txStr = fmtBytes(p.tx || 0);
+    const el = document.getElementById('st-total');
+    if (el) el.textContent = `${rxStr} / ${txStr}`;
+  }
+  if (stats.today) {
+    const elTot = document.getElementById('tm-today-total');
+    const elRx  = document.getElementById('tm-today-rx');
+    const elTx  = document.getElementById('tm-today-tx');
+    if (elTot) elTot.textContent = fmtBytes(stats.today.total);
+    if (elRx)  elRx.textContent  = fmtBytes(stats.today.rx);
+    if (elTx)  elTx.textContent  = fmtBytes(stats.today.tx);
+  }
+  if (stats.week) {
+    const elTot = document.getElementById('tm-week-total');
+    const elRx  = document.getElementById('tm-week-rx');
+    const elTx  = document.getElementById('tm-week-tx');
+    if (elTot) elTot.textContent = fmtBytes(stats.week.total);
+    if (elRx)  elRx.textContent  = fmtBytes(stats.week.rx);
+    if (elTx)  elTx.textContent  = fmtBytes(stats.week.tx);
+  }
+  if (stats.month) {
+    const elTot = document.getElementById('tm-month-total');
+    const elRx  = document.getElementById('tm-month-rx');
+    const elTx  = document.getElementById('tm-month-tx');
+    if (elTot) elTot.textContent = fmtBytes(stats.month.total);
+    if (elRx)  elRx.textContent  = fmtBytes(stats.month.rx);
+    if (elTx)  elTx.textContent  = fmtBytes(stats.month.tx);
+  }
+  if (stats.all) {
+    const elTot = document.getElementById('tm-all-total');
+    const elRx  = document.getElementById('tm-all-rx');
+    const elTx  = document.getElementById('tm-all-tx');
+    if (elTot) elTot.textContent = fmtBytes(stats.all.total);
+    if (elRx)  elRx.textContent  = fmtBytes(stats.all.rx);
+    if (elTx)  elTx.textContent  = fmtBytes(stats.all.tx);
+  }
+}
+
+function openTrafficModal() {
+  const modal = document.getElementById('traffic-modal');
+  if (modal) modal.classList.add('open');
+  loadTrafficHistory();
+}
+
+function closeTrafficModal() {
+  const modal = document.getElementById('traffic-modal');
+  if (modal) modal.classList.remove('open');
+}
+
+function loadTrafficHistory() {
+  const statusEl = document.getElementById('tm-history-status');
+  if (statusEl) statusEl.textContent = 'Memuat...';
+  fetch('/api/traffic/history')
+    .then(r => r.json())
+    .then(data => {
+      if (statusEl) statusEl.textContent = 'Live Synced';
+      if (data && data.history) {
+        renderTrafficHistoryTable(data.history);
+      }
+    })
+    .catch(() => {
+      if (statusEl) statusEl.textContent = 'Offline';
+    });
+}
+
+function renderTrafficHistoryTable(history) {
+  const tbody = document.getElementById('tm-history-tbody');
+  if (!tbody) return;
+  if (!history || history.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:15px; color:var(--muted);">Belum ada catatan riwayat traffic.</td></tr>';
+    return;
+  }
+  let maxTotal = 1;
+  history.forEach(h => { if (h.total > maxTotal) maxTotal = h.total; });
+  
+  tbody.innerHTML = history.map(h => {
+    const rxPct = Math.round((h.rx / (h.total || 1)) * 100);
+    const txPct = 100 - rxPct;
+    const barWidth = Math.max(5, Math.round((h.total / maxTotal) * 100));
+    return `
+      <tr>
+        <td style="font-weight:600; color:#67e8f9;">${h.date}</td>
+        <td style="color:#34d399;">${fmtBytes(h.rx)}</td>
+        <td style="color:#f472b6;">${fmtBytes(h.tx)}</td>
+        <td style="font-weight:700;">${fmtBytes(h.total)}</td>
+        <td>
+          <div style="background:rgba(255,255,255,0.08); border-radius:4px; height:8px; width:100%; overflow:hidden; display:flex;">
+            <div style="background:#34d399; width:${(rxPct * barWidth) / 100}%;" title="RX: ${rxPct}%"></div>
+            <div style="background:#f472b6; width:${(txPct * barWidth) / 100}%;" title="TX: ${txPct}%"></div>
+          </div>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') closeTrafficModal();
+});
+
 function updateStats(data) {
   const vms = nodes.filter(n => n.parent === 'proxmox');
   const clients = nodes.filter(n => n.parent === 'router' && n.id !== 'proxmox');
@@ -273,7 +401,12 @@ function updateStats(data) {
   document.getElementById('st-clients').textContent = clients.length;
   document.getElementById('st-dl').textContent = fmtSpeed(data.hostRx || 0);
   document.getElementById('st-ul').textContent = fmtSpeed(data.hostTx || 0);
-  document.getElementById('st-total').textContent = `${fmtBytes(data.hostRxBytes||0)} / ${fmtBytes(data.hostTxBytes||0)}`;
+  if (data.trafficStats) {
+    currentTrafficStats = data.trafficStats;
+    applyTrafficView(data.trafficStats);
+  } else {
+    document.getElementById('st-total').textContent = `${fmtBytes(data.hostRxBytes||0)} / ${fmtBytes(data.hostTxBytes||0)}`;
+  }
   document.getElementById('st-lag').textContent = data.ts ? ((Date.now()/1000 - data.ts)).toFixed(1) + 's' : '—';
 }
 
@@ -841,6 +974,7 @@ canvas.addEventListener('pointerup', handlePointerEnd);
 canvas.addEventListener('pointercancel', handlePointerEnd);
 
 function init() {
+  setTrafficPeriod(currentTrafficPeriod);
   resize();
   nodes = DEFAULTS.map(d => ({ ...d, rx:0, tx:0, tRx:0, tTx:0, w:180, h:60 }));
   _lastNodeIds = nodes.map(n => n.id).sort().join(',');
