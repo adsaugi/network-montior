@@ -119,6 +119,108 @@ body::before {
 .toast.fade { opacity:0; transform:translateX(20px); }
 .toast-red { color:#f87171; border-left:3px solid #f87171; }
 .toast-green { color:#34d399; border-left:3px solid #34d399; }
+
+/* ── Traffic Breakdown Modal & Badges ───────────────────────────── */
+.cursor-pointer { cursor:pointer; }
+.traffic-badge {
+  font-size:9px; padding:1px 6px; border-radius:4px;
+  background:rgba(103,232,249,0.15); color:#67e8f9;
+  border:1px solid rgba(103,232,249,0.3); font-weight:700;
+  letter-spacing:0.5px; transition:all 0.2s;
+}
+.traffic-badge:hover {
+  background:rgba(103,232,249,0.3);
+}
+.traffic-modal-backdrop {
+  position:fixed; inset:0; z-index:9999;
+  background:rgba(0, 0, 0, 0.75);
+  backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px);
+  display:none; align-items:center; justify-content:center;
+  padding:20px;
+}
+.traffic-modal-backdrop.open {
+  display:flex !important;
+}
+.traffic-modal-content {
+  background:var(--panel); border:1px solid var(--border);
+  border-radius:12px; width:100%; max-width:680px; max-height:90vh;
+  box-shadow:0 20px 50px rgba(0,0,0,0.8), 0 0 30px rgba(103,232,249,0.15);
+  display:flex; flex-direction:column; overflow:hidden;
+  animation:modalSlide 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes modalSlide {
+  from { opacity:0; transform:translateY(15px) scale(0.98); }
+  to { opacity:1; transform:translateY(0) scale(1); }
+}
+.traffic-modal-header {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:16px 20px; border-bottom:1px solid var(--border);
+  background:var(--panel);
+}
+.traffic-close-btn {
+  background:transparent; border:none; color:var(--muted); font-size:18px;
+  cursor:pointer; padding:4px 8px; border-radius:4px; transition:all 0.2s;
+}
+.traffic-close-btn:hover { color:#ef4444; background:rgba(239,68,68,0.1); }
+
+.traffic-period-pills {
+  display:flex; gap:6px; background:rgba(0,0,0,0.3); padding:3px; border-radius:8px; border:1px solid var(--border);
+}
+.traffic-pill {
+  background:transparent; border:none; color:var(--muted); font-family:var(--mono);
+  font-size:10px; font-weight:700; padding:4px 10px; border-radius:5px; cursor:pointer;
+  transition:all 0.2s;
+}
+.traffic-pill:hover { color:var(--text); }
+.traffic-pill.active {
+  background:#0284c7; color:#fff; box-shadow:0 0 10px rgba(2,132,199,0.4);
+}
+
+.traffic-grid {
+  display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; padding:0 20px;
+}
+@media (max-width: 500px) {
+  .traffic-grid { grid-template-columns:1fr; }
+}
+.traffic-card {
+  background:var(--bg); border:1px solid var(--border);
+  border-radius:8px; padding:12px; position:relative; overflow:hidden;
+}
+.traffic-card-title {
+  font-size:10px; font-weight:700; color:var(--muted); letter-spacing:0.5px;
+}
+.traffic-card-total {
+  font-size:18px; font-weight:800; color:var(--text); margin:4px 0; font-family:var(--mono);
+}
+.traffic-card-sub {
+  font-size:11px; display:flex; gap:12px; margin-top:4px; font-family:var(--mono);
+}
+
+.traffic-table-wrap {
+  padding:0 20px; max-height:220px; overflow-y:auto;
+}
+.traffic-table {
+  width:100%; border-collapse:collapse; font-size:11px; font-family:var(--mono);
+}
+.traffic-table th {
+  text-align:left; padding:8px; color:var(--muted); font-size:9px; text-transform:uppercase;
+  border-bottom:1px solid var(--border); background:rgba(0,0,0,0.2); position:sticky; top:0;
+}
+.traffic-table td {
+  padding:7px 8px; border-bottom:1px solid rgba(255,255,255,0.05); color:var(--text);
+}
+.traffic-modal-footer {
+  padding:12px 20px; border-top:1px solid var(--border);
+  display:flex; align-items:center; justify-content:space-between; background:var(--panel);
+}
+.traffic-btn-secondary {
+  background:rgba(255,255,255,0.1); border:1px solid var(--border);
+  color:var(--text); font-family:var(--mono); font-size:11px; font-weight:700;
+  padding:6px 14px; border-radius:6px; cursor:pointer; transition:all 0.2s;
+}
+.traffic-btn-secondary:hover {
+  background:rgba(255,255,255,0.2);
+}
 </style>
 </head>
 <body class="no-grid">
@@ -192,7 +294,7 @@ body::before {
 <div id="toast-container"></div>
 
 <!-- Traffic Breakdown Modal -->
-<div id="traffic-modal" class="traffic-modal-backdrop" onclick="if(event.target===this) closeTrafficModal()">
+<div id="traffic-modal" class="traffic-modal-backdrop" style="display:none;" onclick="if(event.target===this) closeTrafficModal()">
   <div class="traffic-modal-content">
     <div class="traffic-modal-header">
       <div style="display:flex; align-items:center; gap:10px;">
@@ -352,6 +454,15 @@ let serverLayout = {};
 let hasMigratedLocalLayout = false;
 
 function savedPos(id) {
+  if (id === 'lxc-103' || (id && id.includes('103'))) {
+    const sp = (serverLayout && serverLayout[id]) ? serverLayout[id] : null;
+    if (sp && sp.x > 1200) return null;
+    try {
+      const s = localStorage.getItem('pos_' + id);
+      const lp = s ? JSON.parse(s) : null;
+      if (lp && lp.x > 1200) return null;
+    } catch(e) {}
+  }
   if (serverLayout && serverLayout[id]) return serverLayout[id];
   try {
     const s = localStorage.getItem('pos_' + id);
@@ -421,6 +532,13 @@ function layout() {
       n.x = Math.max(300, W * 0.45); n.y = Math.max(100, cy - 140);
     } else if (n.id === 'tailscale') {
       n.x = Math.max(300, W * 0.45); n.y = cy + 200; // Position below router
+    } else if (n.id === 'lxc-103' || (n.label && n.label.includes('ADGUARD'))) {
+      n.x = Math.max(300, W * 0.40); n.y = cy + 120; // Position Adguard between router and wifi clients
+    } else if (n.parent === 'lxc-103' || (n.parent && n.parent.includes('103'))) {
+      const sibs = nodes.filter(x => x.parent === n.parent);
+      const i = sibs.indexOf(n);
+      const startY = (cy + 120) - ((sibs.length - 1) * 75) / 2;
+      n.x = Math.max(520, W * 0.65); n.y = startY + (i * 75);
     } else if (n.parent === 'proxmox') {
       const sibs = nodes.filter(x => x.parent === 'proxmox');
       const i = sibs.indexOf(n);
@@ -432,7 +550,7 @@ function layout() {
       const startY = (cy + 200) - ((sibs.length - 1) * 75) / 2;
       n.x = Math.max(500, W * 0.75); n.y = startY + (i * 75);
     } else if (n.parent === 'router') {
-      const sibs = nodes.filter(x => x.parent === 'router' && x.id !== 'proxmox' && x.id !== 'tailscale');
+      const sibs = nodes.filter(x => x.parent === 'router' && x.id !== 'proxmox' && x.id !== 'tailscale' && x.id !== 'lxc-103');
       const i = sibs.indexOf(n);
       const startY = cy + 100;
       n.x = Math.max(250, W * 0.35); n.y = startY + (i * 75);
@@ -471,6 +589,13 @@ function applyLiveData(data) {
   const pveIPSet = new Set(data.pveIPs || []);
   const desired = [];
 
+  let adguardId = null;
+  (data.vms||[]).forEach(v => {
+    if (v.vmid === 103 || (v.name && v.name.toLowerCase().includes('adguard'))) {
+      adguardId = v.id;
+    }
+  });
+
   let pveRx = 0, pveTx = 0;
   (data.vms||[]).forEach(v => { pveRx += v.rxKbps||0; pveTx += v.txKbps||0; });
 
@@ -502,7 +627,8 @@ function applyLiveData(data) {
       }
     }
     
-    desired.push({ id:v.id, label:(v.name||v.id).toUpperCase(), sub:subText, kind:v.type.toLowerCase().includes('lxc')?'lxc':'vm', parent:'proxmox', online:v.online, tRx:totalRx, tTx:totalTx, ip:finalIp, cpu:v.cpu, memMB:v.memMB, w:190, h:50 });
+    let vmParent = (v.id === adguardId) ? 'router' : 'proxmox';
+    desired.push({ id:v.id, label:(v.name||v.id).toUpperCase(), sub:subText, kind:v.type.toLowerCase().includes('lxc')?'lxc':'vm', parent:vmParent, online:v.online, tRx:totalRx, tTx:totalTx, ip:finalIp, cpu:v.cpu, memMB:v.memMB, w:190, h:50 });
   });
 
   if (data.tailscale && data.tailscale.length > 0) {
@@ -540,11 +666,74 @@ function applyLiveData(data) {
     }
   }
 
-  (data.arpDevices||[]).forEach(d => {
-    if (pveIPSet.has(d.ip)) return;
+  // Deduplicate and filter arpDevices
+  const GENERIC_NAMES = new Set(['WIFICLIENT', 'CLIENT', 'DEVICE', 'ANDROID', 'APPLE', 'IPHONEIPAD', 'UNKNOWN', '']);
+  const activeArp = (data.arpDevices || []).filter(d => {
+    let label = (d.name || d.id || '').toUpperCase();
+    if (label.includes('(')) label = label.split('(')[0].trim();
+    const isMobileClient = (d.type === 'apple' || d.type === 'android' || label.includes('IPAD') || label.includes('PHONE') || label.includes('GALAXY'));
+    if (pveIPSet.has(d.ip) && !isMobileClient) return false;
+    return true;
+  });
+
+  function getDevScore(d) {
+    let s = 0;
+    if ((d.rxKbps || 0) > 0 || (d.txKbps || 0) > 0) s += 1000;
+    s += Math.min(500, ((d.rxBytes || 0) + (d.txBytes || 0)) / (1024 * 1024));
+    s += (d.dnsQueries || 0) * 2;
+    if (d.mac && d.mac !== '00:00:00:00:00:00') s += 50;
+    return s;
+  }
+
+  function getDevNorm(d) {
+    let raw = (d.name || d.id || '').toUpperCase();
+    if (raw.includes('(')) raw = raw.split('(')[0].trim();
+    let norm = raw.replace(/[^A-Z0-9]/g, '');
+    if (GENERIC_NAMES.has(norm) || /^\d+$/.test(norm) || norm.length < 3) return null;
+    return norm;
+  }
+
+  const dropDevIps = new Set();
+  const macGroups = {};
+  activeArp.forEach(d => {
+    if (d.mac && d.mac !== '00:00:00:00:00:00') {
+      if (!macGroups[d.mac]) macGroups[d.mac] = [];
+      macGroups[d.mac].push(d);
+    }
+  });
+  Object.values(macGroups).forEach(group => {
+    if (group.length > 1) {
+      group.sort((a, b) => getDevScore(b) - getDevScore(a));
+      group.slice(1).forEach(loser => dropDevIps.add(loser.ip));
+    }
+  });
+
+  const nameGroups = {};
+  activeArp.forEach(d => {
+    if (dropDevIps.has(d.ip)) return;
+    const norm = getDevNorm(d);
+    if (norm) {
+      if (!nameGroups[norm]) nameGroups[norm] = [];
+      nameGroups[norm].push(d);
+    }
+  });
+  Object.values(nameGroups).forEach(group => {
+    if (group.length > 1) {
+      group.sort((a, b) => getDevScore(b) - getDevScore(a));
+      group.slice(1).forEach(loser => dropDevIps.add(loser.ip));
+    }
+  });
+
+  activeArp.filter(d => !dropDevIps.has(d.ip)).forEach(d => {
     let label = (d.name || d.id).toUpperCase();
+    if (label.includes('(')) label = label.split('(')[0].trim();
     if (label.includes('IPHONE') || label.includes('IPAD') || label.includes('APPLE')) d.type = 'apple';
-    desired.push({ id:d.id, label:label, sub:d.ip, kind:d.type||'device', parent:'router', online:d.online, tRx:d.rxKbps||0, tTx:d.txKbps||0, ip:d.ip, w:180, h:50 });
+    if (label.includes('ANDROID') || label.includes('GALAXY') || label.includes('SAMSUNG')) d.type = 'android';
+
+    let subText = d.ip;
+    if (d.dnsQueries) subText += ` | ${d.dnsQueries} DNS`;
+    let wifiParent = adguardId || 'router';
+    desired.push({ id:d.id, label:label, sub:subText, kind:d.type||'device', parent:wifiParent, online:d.online, tRx:d.rxKbps||0, tTx:d.txKbps||0, ip:d.ip, dnsQueries:d.dnsQueries||0, rxBytes:d.rxBytes||0, txBytes:d.txBytes||0, w:180, h:50 });
   });
 
   desired.forEach(n => {
@@ -569,11 +758,18 @@ function applyLiveData(data) {
   } else {
     const desiredMap = {};
     desired.forEach(d => { desiredMap[d.id] = d; });
+    let parentChanged = false;
     nodes.forEach(n => {
       const d = desiredMap[n.id];
       if (!d) return;
+      if (n.parent !== d.parent) { n.parent = d.parent; parentChanged = true; }
       n.tRx = d.tRx; n.tTx = d.tTx; n.online = d.online; n.label = d.label; n.sub = d.sub; n.ip = d.ip; n.cpu = d.cpu; n.memMB = d.memMB;
+      n.dnsQueries = d.dnsQueries; n.rxBytes = d.rxBytes; n.txBytes = d.txBytes;
     });
+    if (parentChanged) {
+      layout();
+      rebuildPackets();
+    }
   }
 
   nodes.forEach(n => {
@@ -719,13 +915,19 @@ function applyTrafficView(stats) {
 
 function openTrafficModal() {
   const modal = document.getElementById('traffic-modal');
-  if (modal) modal.classList.add('open');
+  if (modal) {
+    modal.style.display = 'flex';
+    modal.classList.add('open');
+  }
   loadTrafficHistory();
 }
 
 function closeTrafficModal() {
   const modal = document.getElementById('traffic-modal');
-  if (modal) modal.classList.remove('open');
+  if (modal) {
+    modal.style.display = 'none';
+    modal.classList.remove('open');
+  }
 }
 
 function loadTrafficHistory() {

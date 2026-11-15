@@ -6,6 +6,28 @@ Format changelog mengikuti pedoman [Keep a Changelog](https://keepachangelog.com
 
 ---
 
+## [v1.0.1] - 2026-11-15
+
+### 🚀 Ditambahkan (Added)
+- **AdGuard Home Gateway & Full Device Accounting (`192.168.1.103`)**:
+  - Integrasi hierarki topologi jaringan: `ISP GATEWAY` ──▶ `ADGUARD` ──▶ `Wi-Fi Clients` & `Proxmox Core`.
+  - LXC 103 `traffic_collector.py` daemon yang memantau arus download/upload semua perangkat Wi-Fi via iptables accounting chain (`ACCOUNT_IN` / `ACCOUNT_OUT`).
+  - Pencatatan otomatis bandwidth historis perangkat ke database SQLite (`device_traffic_hourly`).
+  - Monitoring metrik total DNS queries per perangkat dari REST API AdGuard Home.
+- **Unified Device Alias Mapping (`device_names.json`)**:
+  - Konfigurasi mapping nama permanen untuk MAC address & IP (Galaxy S20+, iPad, dll.) yang kebal dari pergantian sewa DHCP dan reset jaringan.
+
+### 🔧 Diperbaiki (Fixed)
+- **Anti-Duplikasi Perangkat (Connection Switch & Roaming)**:
+  - Mengatasi bug munculnya perangkat ganda saat berganti koneksi (contoh: Galaxy S20+ berpindah Wi-Fi ↔ USB/LAN atau reconnect DHCP lease).
+  - Algoritma *liveness scoring & deduplication* otomatis mengeliminasi lease IP lama/hantu dan memprioritaskan IP yang aktif.
+  - Deduplikasi ganda di sisi backend (`server.py`) dan frontend canvas (`index.html` & `app.js`).
+- **Pembersihan UI & Modal Styling**:
+  - Memperbaiki styling modal analitik dan memastikan tersembunyi (`display: none !important`) secara default saat inisialisasi halaman.
+  - Perbaikan layout kanvas dan partikel alur data agar device Wi-Fi tersambung rapi ke AdGuard.
+
+---
+
 ## [v1.1.0] - 2026-11-15
 
 ### 🚀 Ditambahkan (Added)

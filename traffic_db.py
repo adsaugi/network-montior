@@ -45,6 +45,20 @@ def init_db():
                         value TEXT
                     );
                 """)
+
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS device_traffic_hourly (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        device_ip TEXT NOT NULL,
+                        device_name TEXT,
+                        period_date TEXT NOT NULL,
+                        period_hour INTEGER NOT NULL,
+                        rx_bytes INTEGER DEFAULT 0,
+                        tx_bytes INTEGER DEFAULT 0,
+                        UNIQUE(device_ip, period_date, period_hour)
+                    );
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_dev_traffic_ip_date ON device_traffic_hourly(device_ip, period_date);")
         finally:
             conn.close()
 
@@ -108,6 +122,64 @@ def record_delta(rx_delta, tx_delta):
             print(f"[TrafficDB] Error recording delta: {e}")
         finally:
             conn.close()
+
+def record_device_delta(device_ip, device_name, rx_delta, tx_delta):
+    """
+    Records per-device traffic delta into device_traffic_hourly.
+    """
+    if rx_delta <= 0 and tx_delta <= 0:
+        return
+
+    now = datetime.datetime.now()
+    d_str = now.strftime("%Y-%m-%d")
+    hr = now.hour
+
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            with conn:
+                conn.execute("""
+                    INSERT INTO device_traffic_hourly (device_ip, device_name, period_date, period_hour, rx_bytes, tx_bytes)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(device_ip, period_date, period_hour) DO UPDATE SET
+                        device_name = excluded.device_name,
+                        rx_bytes = rx_bytes + excluded.rx_bytes,
+                        tx_bytes = tx_bytes + excluded.tx_bytes
+                """, (device_ip, device_name, d_str, hr, int(rx_delta), int(tx_delta)))
+        except Exception as e:
+            print(f"[TrafficDB] Error recording device delta for {device_ip}: {e}")
+        finally:
+            conn.close()
+
+def get_devices_traffic_today():
+    """
+    Returns today's total rx and tx per device IP.
+    """
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    result = {}
+    with _db_lock:
+        conn = _get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT device_ip, COALESCE(MAX(device_name), ''), COALESCE(SUM(rx_bytes), 0), COALESCE(SUM(tx_bytes), 0)
+                FROM device_traffic_hourly
+                WHERE period_date = ?
+                GROUP BY device_ip
+            """, (today_str,))
+            for row in cursor.fetchall():
+                ip, name, rx, tx = row
+                result[ip] = {
+                    "name": name,
+                    "rx_bytes": int(rx),
+                    "tx_bytes": int(tx),
+                    "total_bytes": int(rx + tx)
+                }
+        except Exception as e:
+            print(f"[TrafficDB] Error getting devices traffic: {e}")
+        finally:
+            conn.close()
+    return result
 
 def get_traffic_summary():
     """

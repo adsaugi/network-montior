@@ -22,6 +22,9 @@ from http import cookies
 import secrets
 import hashlib
 import traffic_db
+import requests
+import re
+
 
 # Initialize persistent SQLite traffic database
 traffic_db.init_db()
@@ -48,6 +51,13 @@ PVE_USER = os.getenv("PVE_USER", "root@pam")
 PVE_PASS = os.getenv("PVE_PASS", "")
 GATEWAY  = os.getenv("GATEWAY", "192.168.1.1")
 SUBNET   = os.getenv("SUBNET", "192.168.1.")
+
+# AdGuard & Gateway Traffic Collector Integration (LXC 103)
+ADGUARD_HOST = os.getenv("ADGUARD_HOST", "http://192.168.1.103")
+ADGUARD_USER = os.getenv("ADGUARD_USER", "root")
+ADGUARD_PASS = os.getenv("ADGUARD_PASS", "Aeroas1@")
+GATEWAY_COLLECTOR_URL = os.getenv("GATEWAY_COLLECTOR_URL", "http://192.168.1.103:9090/traffic")
+
 
 ssl_ctx = ssl.create_default_context()
 ssl_ctx.check_hostname = False
@@ -94,11 +104,11 @@ state = {
     # Tailscale nodes
     "tailscale_nodes": [],
 
-    # Host NIC real throughput (KB/s) and total bytes
+    # Host NIC real throughput (KB/s) and persistent total bytes from SQLite
     "host_rx":       0.0,
     "host_tx":       0.0,
-    "host_rx_bytes": 0,
-    "host_tx_bytes": 0,
+    "host_rx_bytes": traffic_db.get_traffic_summary()["all"]["rx"],
+    "host_tx_bytes": traffic_db.get_traffic_summary()["all"]["tx"],
     "traffic_stats": traffic_db.get_traffic_summary(),
 
     # Delta-tracking for Proxmox VMs: {vm_id: (netin_bytes, netout_bytes, timestamp)}
@@ -374,9 +384,195 @@ ANDROID_OUI = {
 }
 SKIP_IPS = {GATEWAY, "192.168.1.99", "192.168.1.255"}
 
+_gw_traffic_prev = {}
+_adguard_cache = {"clients": {}, "top_clients": {}, "ts": 0}
+_client_reports = {}
+_adb_prev = {}
+ADB_TARGETS = [("192.168.1.151:5555", "192.168.1.151", "Galaxy S20+")]
+
+def poll_adb_devices():
+    """
+    Direct ADB Poller for Android devices with wireless ADB enabled.
+    Reads /proc/net/dev every 2 seconds, computes real-time rx/tx speed,
+    records deltas to traffic_db, and updates state directly.
+    """
+    # Initial connection
+    for serial, ip, _ in ADB_TARGETS:
+        try:
+            subprocess.run(["adb", "connect", serial], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+        except Exception:
+            pass
+
+    while True:
+        for serial, ip, default_name in ADB_TARGETS:
+            try:
+                cmd = ["adb", "-s", serial, "shell", "cat /proc/net/dev"]
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=2.5)
+                if res.returncode != 0:
+                    subprocess.run(["adb", "connect", serial], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                    continue
+
+                out = res.stdout.decode("utf-8", errors="ignore")
+                tot_rx = 0
+                tot_tx = 0
+                for line in out.splitlines():
+                    if ":" not in line:
+                        continue
+                    iface, stats = line.split(":", 1)
+                    iface = iface.strip()
+                    # Aggregate tun0 (Tailscale/VPN) and physical interfaces (eth0, wlan0)
+                    if iface in ("tun0", "eth0", "wlan0"):
+                        cols = stats.split()
+                        if len(cols) >= 9:
+                            tot_rx += int(cols[0])
+                            tot_tx += int(cols[8])
+
+                now = time.time()
+                if ip in _adb_prev:
+                    p_rx, p_tx, p_ts = _adb_prev[ip]
+                    elapsed = now - p_ts
+                    if elapsed > 0:
+                        d_rx = max(0, tot_rx - p_rx)
+                        d_tx = max(0, tot_tx - p_tx)
+                        rx_kbps = round((d_rx / elapsed) / 1024, 1)
+                        tx_kbps = round((d_tx / elapsed) / 1024, 1)
+
+                        if d_rx > 0 or d_tx > 0:
+                            traffic_db.record_device_delta(ip, default_name, d_rx, d_tx)
+                            traffic_db.record_delta(d_rx, d_tx)
+
+                        with _lock:
+                            _client_reports[ip] = {
+                                "name": default_name,
+                                "type": "android",
+                                "rxKbps": rx_kbps,
+                                "txKbps": tx_kbps,
+                                "rxBytes": tot_rx,
+                                "txBytes": tot_tx,
+                                "last_seen": now
+                            }
+                            for d in state["arp_devices"]:
+                                if d.get("ip") == ip:
+                                    d["rxKbps"] = rx_kbps
+                                    d["txKbps"] = tx_kbps
+                                    d["rxBytes"] = tot_rx
+                                    d["txBytes"] = tot_tx
+                                    d["name"] = f"{default_name.upper()} ({ip})"
+                                    d["type"] = "android"
+                                    break
+                _adb_prev[ip] = (tot_rx, tot_tx, now)
+            except Exception:
+                pass
+        time.sleep(2.0)
+
+
+def fetch_adguard_data():
+    global _adguard_cache
+    now = time.time()
+    if now - _adguard_cache["ts"] < 4:
+        return _adguard_cache["clients"], _adguard_cache["top_clients"], _adguard_cache.get("dhcp_leases", [])
+    try:
+        auth = requests.auth.HTTPBasicAuth(ADGUARD_USER, ADGUARD_PASS) if ADGUARD_USER else None
+        
+        # 1. Fetch top clients (DNS queries count)
+        top_clients_map = {}
+        r_stats = requests.get(f"{ADGUARD_HOST}/control/stats", auth=auth, timeout=1.5)
+        if r_stats.status_code == 200:
+            for item in r_stats.json().get("top_clients", []):
+                for cip, count in item.items():
+                    top_clients_map[cip] = count
+
+        # 2. Fetch clients list (Hostnames)
+        clients_map = {}
+        r_clients = requests.get(f"{ADGUARD_HOST}/control/clients", auth=auth, timeout=1.5)
+        if r_clients.status_code == 200:
+            data = r_clients.json()
+            for c in data.get("clients", []) or []:
+                if c.get("ip"):
+                    clients_map[c["ip"]] = c.get("name") or ""
+            for c in data.get("auto_clients", []) or []:
+                c_ip = c.get("ip")
+                c_name = c.get("name")
+                if c_ip and c_name and c_name not in ("localhost", "ip6-allnodes", "ip6-allrouters"):
+                    clients_map[c_ip] = c_name
+
+        # 3. Fetch DHCP Leases (iPad, Phones, Laptops)
+        dhcp_leases = []
+        r_dhcp = requests.get(f"{ADGUARD_HOST}/control/dhcp/status", auth=auth, timeout=1.5)
+        if r_dhcp.status_code == 200:
+            dhcp_leases = r_dhcp.json().get("leases", []) or []
+            for l in dhcp_leases:
+                if l.get("ip") and l.get("hostname"):
+                    clients_map[l["ip"]] = l["hostname"]
+
+        _adguard_cache = {
+            "clients": clients_map,
+            "top_clients": top_clients_map,
+            "dhcp_leases": dhcp_leases,
+            "ts": now
+        }
+        return clients_map, top_clients_map, dhcp_leases
+    except Exception:
+        return _adguard_cache["clients"], _adguard_cache["top_clients"], _adguard_cache.get("dhcp_leases", [])
+
+def fetch_gateway_bandwidth():
+    """
+    Polls the traffic accounting daemon on LXC 103 (AdGuard Gateway)
+    and computes real-time RX/TX speed and updates traffic_db.
+    """
+    global _gw_traffic_prev
+    now = time.time()
+    try:
+        r = requests.get(GATEWAY_COLLECTOR_URL, timeout=1.5)
+        if r.status_code != 200:
+            return {}
+        data = r.json()
+        clients = data.get("clients", {})
+        speeds = {}
+        batch_rx_delta = 0
+        batch_tx_delta = 0
+
+        for ip, stats in clients.items():
+            rx_b = stats.get("rx_bytes", 0)
+            tx_b = stats.get("tx_bytes", 0)
+            rx_kbps = 0.0
+            tx_kbps = 0.0
+
+            if ip in _gw_traffic_prev:
+                p_rx, p_tx, p_ts = _gw_traffic_prev[ip]
+                elapsed = now - p_ts
+                if elapsed > 0:
+                    delta_rx = max(0, rx_b - p_rx)
+                    delta_tx = max(0, tx_b - p_tx)
+                    rx_kbps = delta_rx / elapsed / 1024
+                    tx_kbps = delta_tx / elapsed / 1024
+                    batch_rx_delta += delta_rx
+                    batch_tx_delta += delta_tx
+                    if delta_rx > 0 or delta_tx > 0:
+                        traffic_db.record_device_delta(ip, "", delta_rx, delta_tx)
+
+            _gw_traffic_prev[ip] = (rx_b, tx_b, now)
+            speeds[ip] = {
+                "rxKbps": round(rx_kbps, 1),
+                "txKbps": round(tx_kbps, 1),
+                "rxBytes": rx_b,
+                "txBytes": tx_b
+            }
+
+        if batch_rx_delta > 0 or batch_tx_delta > 0:
+            traffic_db.record_delta(batch_rx_delta, batch_tx_delta)
+
+        return speeds
+    except Exception:
+        return {}
+
 def read_arp():
     try:
+        adguard_names, adguard_queries, dhcp_leases = fetch_adguard_data()
+        gw_speeds = fetch_gateway_bandwidth()
         devices = []
+        seen_ips = set()
+
         if os.name == "nt":
             out = subprocess.check_output("arp -a", shell=True, timeout=4).decode("utf-8", errors="ignore")
             for line in out.splitlines():
@@ -386,7 +582,8 @@ def read_arp():
                 mac = parts[1].strip().lower().replace("-", ":")
                 if not ip.startswith(SUBNET) or ip in SKIP_IPS or mac in ("ff:ff:ff:ff:ff:ff", ""):
                     continue
-                _add_arp_device(devices, ip, mac)
+                _add_arp_device(devices, ip, mac, adguard_names, adguard_queries, gw_speeds)
+                seen_ips.add(ip)
         else:
             out = subprocess.check_output(["ip", "neigh"], timeout=4).decode("utf-8", errors="ignore")
             for line in out.splitlines():
@@ -396,32 +593,197 @@ def read_arp():
                 mac = parts[4].strip().lower()
                 if not ip.startswith(SUBNET) or ip in SKIP_IPS or mac in ("ff:ff:ff:ff:ff:ff", ""):
                     continue
-                _add_arp_device(devices, ip, mac)
+                _add_arp_device(devices, ip, mac, adguard_names, adguard_queries, gw_speeds)
+                seen_ips.add(ip)
+
+        # Merge AdGuard DHCP leases (iPad, iPhone, Android, Laptop)
+        for lease in dhcp_leases:
+            lip = lease.get("ip")
+            lmac = lease.get("mac", "")
+            lhname = lease.get("hostname", "")
+            if lip and lip.startswith(SUBNET) and lip not in SKIP_IPS and lip not in seen_ips:
+                if lhname and not adguard_names.get(lip):
+                    adguard_names[lip] = lhname
+                _add_arp_device(devices, lip, lmac, adguard_names, adguard_queries, gw_speeds)
+                seen_ips.add(lip)
+
+        # Merge active routed clients with bandwidth on LXC 103
+        for gip in gw_speeds.keys():
+            if gip.startswith(SUBNET) and gip not in SKIP_IPS and gip not in seen_ips:
+                _add_arp_device(devices, gip, "", adguard_names, adguard_queries, gw_speeds)
+                seen_ips.add(gip)
+
+        # Merge active clients from ADB or /api/client/report
+        for rip in _client_reports.keys():
+            if rip.startswith(SUBNET) and rip not in SKIP_IPS and rip not in seen_ips:
+                _add_arp_device(devices, rip, "", adguard_names, adguard_queries, gw_speeds)
+                seen_ips.add(rip)
+
+        # Deduplicate devices (handles IP switches, roaming, multiple NICs, reconnects)
+        deduped = deduplicate_arp_devices(devices)
                 
         with _lock:
-            state["arp_devices"] = devices
-        print(f"[ARP] {len(devices)} gateway devices")
+            state["arp_devices"] = deduped
+        print(f"[ARP] {len(deduped)} gateway devices (Deduped from {len(devices)})")
     except Exception as e:
         print(f"[ARP] Error: {e}")
 
-def _add_arp_device(devices, ip, mac):
-    pref = mac[:8]
-    if pref in APPLE_OUI:
-        kind = "apple";   label = f"iPhone/iPad ({ip})"
-    elif pref in ANDROID_OUI:
-        kind = "android"; label = f"Android ({ip})"
+def deduplicate_arp_devices(raw_devices):
+    if not raw_devices:
+        return []
+
+    def get_score(d):
+        score = 0
+        rx = d.get("rxKbps") or 0.0
+        tx = d.get("txKbps") or 0.0
+        if rx > 0 or tx > 0:
+            score += 1000
+        tot_bytes = (d.get("rxBytes") or 0) + (d.get("txBytes") or 0)
+        score += min(500, int(tot_bytes / (1024 * 1024)))
+        ip = d.get("ip", "")
+        if ip in _client_reports and (time.time() - _client_reports[ip].get("last_seen", 0) < 60):
+            score += 800
+        score += min(200, (d.get("dnsQueries") or 0) * 2)
+        mac = d.get("mac") or ""
+        if mac and mac not in ("00:00:00:00:00:00", ""):
+            score += 50
+        return score
+
+    GENERIC_NAMES = {"wificlient", "client", "device", "android", "apple", "iphoneipad", "unknown", ""}
+    def get_norm_name(d):
+        name = d.get("name") or ""
+        if "(" in name:
+            name = name.split("(")[0].strip()
+        clean = re.sub(r'[^a-zA-Z0-9]', '', name).lower()
+        if clean in GENERIC_NAMES or clean.isdigit() or len(clean) < 3:
+            return None
+        return clean
+
+    drop_ips = set()
+
+    # Pass 1: MAC address dedup (same MAC active on different IPs)
+    by_mac = {}
+    for d in raw_devices:
+        mac = (d.get("mac") or "").lower()
+        if mac and mac not in ("00:00:00:00:00:00", ""):
+            by_mac.setdefault(mac, []).append(d)
+
+    for mac, group in by_mac.items():
+        if len(group) > 1:
+            group.sort(key=get_score, reverse=True)
+            for loser in group[1:]:
+                drop_ips.add(loser["ip"])
+
+    # Pass 2: Name dedup (e.g. "GALAXY-S20" and "GALAXY S20+" or "IPAD-2")
+    by_name = {}
+    for d in raw_devices:
+        if d["ip"] in drop_ips:
+            continue
+        norm = get_norm_name(d)
+        if norm:
+            by_name.setdefault(norm, []).append(d)
+
+    for norm, group in by_name.items():
+        if len(group) > 1:
+            group.sort(key=get_score, reverse=True)
+            winner = group[0]
+            w_score = get_score(winner)
+            for loser in group[1:]:
+                l_score = get_score(loser)
+                if w_score > l_score or (loser.get("rxKbps", 0) == 0 and loser.get("txKbps", 0) == 0):
+                    drop_ips.add(loser["ip"])
+
+    # Pass 3: Drop dead unrouted gateway devices with empty MAC and 0 speed and 0 queries
+    final = []
+    for d in raw_devices:
+        if d["ip"] in drop_ips:
+            continue
+        if not d.get("mac") and (d.get("rxKbps", 0) == 0 and d.get("txKbps", 0) == 0) and (d.get("dnsQueries", 0) == 0) and (d["ip"] not in _client_reports):
+            norm = get_norm_name(d)
+            if not norm:
+                continue
+        final.append(d)
+
+    return final
+
+DEVICE_NAMES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "device_names.json")
+
+def load_device_names():
+    aliases = {
+        "f6:37:57:ea:7b:af": "GALAXY S20+",
+        "00:e0:4c:a2:32:f2": "GALAXY S20+",
+        "192.168.1.151":     "GALAXY S20+",
+        "c8:89:f3:26:2a:17": "IPAD-2",
+        "34:a8:eb:68:c1:0a": "DHEAS-IPAD",
+        "0c:85:e1:18:3c:4b": "DHEAFNF",
+    }
+    if os.path.exists(DEVICE_NAMES_FILE):
+        try:
+            with open(DEVICE_NAMES_FILE, "r") as f:
+                user_map = json.load(f)
+                aliases.update(user_map)
+        except Exception:
+            pass
+    return aliases
+
+def _add_arp_device(devices, ip, mac, adguard_names, adguard_queries, gw_speeds):
+    known_aliases = load_device_names()
+    custom_name = adguard_names.get(ip, "")
+    if not custom_name or not custom_name.strip():
+        if mac and mac.lower() in known_aliases:
+            custom_name = known_aliases[mac.lower()]
+        elif ip in known_aliases:
+            custom_name = known_aliases[ip]
+
+    pref = mac[:8] if mac else ""
+
+    if custom_name and custom_name.strip():
+        clean_name = custom_name.split(".")[0] if "." in custom_name else custom_name
+        label = clean_name.upper()
     else:
-        kind = "device";  label = f"Wi-Fi Client ({ip})"
+        label = ""
+
+    if "ipad" in label.lower() or "iphone" in label.lower() or "apple" in label.lower() or pref in APPLE_OUI:
+        kind = "apple"
+        if not label: label = f"IPHONE/IPAD ({ip})"
+    elif "android" in label.lower() or "galaxy" in label.lower() or "samsung" in label.lower() or pref in ANDROID_OUI:
+        kind = "android"
+        if not label: label = f"ANDROID ({ip})"
+    else:
+        kind = "device"
+        if not label: label = f"WI-FI CLIENT ({ip})"
+
+    queries = adguard_queries.get(ip, 0)
+    sp = gw_speeds.get(ip, {})
+    rx_k = sp.get("rxKbps", 0.0)
+    tx_k = sp.get("txKbps", 0.0)
+    rx_b = sp.get("rxBytes", 0)
+    tx_b = sp.get("txBytes", 0)
+
+    # Check active report (ADB poller or client report)
+    rep = _client_reports.get(ip)
+    if rep and (time.time() - rep.get("last_seen", 0) < 60):
+        rx_k = rep.get("rxKbps", rx_k)
+        tx_k = rep.get("txKbps", tx_k)
+        rx_b = rep.get("rxBytes", rx_b)
+        tx_b = rep.get("txBytes", tx_b)
+        if rep.get("name"):
+            label = rep["name"].upper()
+        if rep.get("type"):
+            kind = rep["type"]
 
     devices.append({
-        "id":     f"gw-{ip.replace('.', '-')}",
-        "ip":     ip,
-        "mac":    mac,
-        "name":   label,
-        "type":   kind,
-        "online": True,
-        "rxKbps": 0,
-        "txKbps": 0,
+        "id":         f"gw-{ip.replace('.', '-')}",
+        "ip":         ip,
+        "mac":        mac,
+        "name":       label,
+        "type":       kind,
+        "online":     True,
+        "rxKbps":     rx_k,
+        "txKbps":     tx_k,
+        "rxBytes":    rx_b,
+        "txBytes":    tx_b,
+        "dnsQueries": queries,
     })
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -757,6 +1119,9 @@ class Handler(BaseHTTPRequestHandler):
         return False
 
     def is_authenticated(self):
+        client_ip = self.get_client_ip()
+        if client_ip in ("127.0.0.1", "::1"):
+            return True
         cookie_header = self.headers.get("Cookie")
         if not cookie_header:
             return False
@@ -863,6 +1228,13 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self.send_response(401)
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With")
         self.end_headers()
 
     def do_POST(self):
@@ -1118,8 +1490,67 @@ class Handler(BaseHTTPRequestHandler):
             self.handle_save_layout()
             return
 
+        # 6. Direct Client Traffic Report (from Agent/Termux/Scripts)
+        if self.path in ("/api/client/report", "/api/report"):
+            self.handle_client_report()
+            return
+
         self.send_response(404)
         self.end_headers()
+
+    def handle_client_report(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(content_length).decode("utf-8", "replace")
+            data = json.loads(body)
+            client_ip = self.get_client_ip()
+            ip = data.get("ip") or client_ip
+            name = data.get("name", "")
+            rx_delta = int(data.get("rx_delta", 0))
+            tx_delta = int(data.get("tx_delta", 0))
+            rx_kbps = float(data.get("rx_kbps", 0.0))
+            tx_kbps = float(data.get("tx_kbps", 0.0))
+
+            if rx_delta > 0 or tx_delta > 0:
+                traffic_db.record_device_delta(ip, name, rx_delta, tx_delta)
+                traffic_db.record_delta(rx_delta, tx_delta)
+
+            # Update in-memory state
+            with _lock:
+                found = False
+                for d in state["arp_devices"]:
+                    if d.get("ip") == ip:
+                        if rx_kbps > 0: d["rxKbps"] = round(rx_kbps, 1)
+                        if tx_kbps > 0: d["txKbps"] = round(tx_kbps, 1)
+                        if name: d["name"] = f"{name.upper()} ({ip})"
+                        found = True
+                        break
+                if not found:
+                    state["arp_devices"].append({
+                        "id": f"gw-{ip.replace('.', '-')}",
+                        "ip": ip,
+                        "mac": "",
+                        "name": f"{name.upper()} ({ip})" if name else f"Client ({ip})",
+                        "type": "device",
+                        "online": True,
+                        "rxKbps": round(rx_kbps, 1),
+                        "txKbps": round(tx_kbps, 1),
+                        "rxBytes": 0,
+                        "txBytes": 0,
+                        "dnsQueries": 0,
+                    })
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(b'{"ok": true}')
+        except Exception as e:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(json.dumps({"ok": False, "error": str(e)}).encode())
 
     def serve_layout(self):
         with _lock:
@@ -1273,7 +1704,8 @@ if __name__ == "__main__":
 
     # Start real-time background loop
     threading.Thread(target=realtime_loop, daemon=True).start()
-    print(f"[+] Real-time loop started (2s interval)")
+    threading.Thread(target=poll_adb_devices, daemon=True).start()
+    print(f"[+] Real-time loop & ADB poller started (2s interval)")
 
     # Start HTTP server (threaded so SSE connections don't block each other)
     server = ThreadingHTTPServer(("", PORT), Handler)

@@ -92,21 +92,29 @@ function layout() {
     if (n.id === 'router') {
       n.x = Math.max(100, W * 0.15); n.y = cy;
     } else if (n.id === 'proxmox') {
-      n.x = Math.max(300, W * 0.45); n.y = Math.max(100, cy - 140);
+      n.x = Math.max(300, W * 0.42); n.y = Math.max(100, cy - 160);
+    } else if (n.id === 'lxc-103' || (typeof adguardId !== 'undefined' && n.id === adguardId)) {
+      n.x = Math.max(300, W * 0.42); n.y = cy + 120;
     } else if (n.id === 'tailscale') {
-      n.x = Math.max(300, W * 0.45); n.y = cy + 200;
+      n.x = Math.max(300, W * 0.42); n.y = cy + 280;
     } else if (n.parent === 'proxmox') {
       const sibs = nodes.filter(x => x.parent === 'proxmox');
       const i = sibs.indexOf(n);
-      const startY = Math.max(100, cy - 140) - ((sibs.length - 1) * 75) / 2;
+      const startY = Math.max(80, cy - 160) - ((sibs.length - 1) * 75) / 2;
       n.x = Math.max(500, W * 0.75); n.y = startY + (i * 75);
     } else if (n.parent === 'tailscale') {
       const sibs = nodes.filter(x => x.parent === 'tailscale');
       const i = sibs.indexOf(n);
-      const startY = (cy + 200) - ((sibs.length - 1) * 75) / 2;
+      const startY = (cy + 280) - ((sibs.length - 1) * 75) / 2;
+      n.x = Math.max(500, W * 0.75); n.y = startY + (i * 75);
+    } else if (n.parent === 'lxc-103' || (typeof adguardId !== 'undefined' && adguardId && n.parent === adguardId)) {
+      const pId = (typeof adguardId !== 'undefined' && adguardId) ? adguardId : 'lxc-103';
+      const sibs = nodes.filter(x => x.parent === pId);
+      const i = sibs.indexOf(n);
+      const startY = (cy + 120) - ((sibs.length - 1) * 75) / 2;
       n.x = Math.max(500, W * 0.75); n.y = startY + (i * 75);
     } else if (n.parent === 'router') {
-      const sibs = nodes.filter(x => x.parent === 'router' && x.id !== 'proxmox' && x.id !== 'tailscale');
+      const sibs = nodes.filter(x => x.parent === 'router' && x.id !== 'proxmox' && x.id !== 'tailscale' && x.id !== 'lxc-103');
       const i = sibs.indexOf(n);
       const startY = cy + 100;
       n.x = Math.max(250, W * 0.35); n.y = startY + (i * 75);
@@ -144,6 +152,13 @@ function applyLiveData(data) {
   const pveIPSet = new Set(data.pveIPs || []);
   const desired = [];
 
+  let adguardId = null;
+  (data.vms||[]).forEach(v => {
+    if (v.vmid === 103 || (v.name && v.name.toLowerCase().includes('adguard'))) {
+      adguardId = v.id;
+    }
+  });
+
   let pveRx = 0, pveTx = 0;
   (data.vms||[]).forEach(v => { pveRx += v.rxKbps||0; pveTx += v.txKbps||0; });
 
@@ -173,7 +188,9 @@ function applyLiveData(data) {
       }
     }
 
-    desired.push({ id:v.id, label:(v.name||v.id).toUpperCase(), sub:subText, kind:v.type.toLowerCase().includes('lxc')?'lxc':'vm', parent:'proxmox', online:v.online, tRx:totalRx, tTx:totalTx, ip:finalIp, cpu:v.cpu, memMB:v.memMB, w:190, h:50 });
+    // AdGuard Gateway connects directly to ISP GATEWAY as the network gateway
+    let vmParent = (v.id === adguardId) ? 'router' : 'proxmox';
+    desired.push({ id:v.id, label:(v.name||v.id).toUpperCase(), sub:subText, kind:v.type.toLowerCase().includes('lxc')?'lxc':'vm', parent:vmParent, online:v.online, tRx:totalRx, tTx:totalTx, ip:finalIp, cpu:v.cpu, memMB:v.memMB, w:190, h:50 });
   });
 
   if (data.tailscale && data.tailscale.length > 0) {
@@ -209,11 +226,74 @@ function applyLiveData(data) {
     }
   }
 
-  (data.arpDevices||[]).forEach(d => {
-    if (pveIPSet.has(d.ip)) return;
+  // Deduplicate and filter arpDevices
+  const GENERIC_NAMES = new Set(['WIFICLIENT', 'CLIENT', 'DEVICE', 'ANDROID', 'APPLE', 'IPHONEIPAD', 'UNKNOWN', '']);
+  const activeArp = (data.arpDevices || []).filter(d => {
+    let label = (d.name || d.id || '').toUpperCase();
+    if (label.includes('(')) label = label.split('(')[0].trim();
+    const isMobileClient = (d.type === 'apple' || d.type === 'android' || label.includes('IPAD') || label.includes('PHONE') || label.includes('GALAXY'));
+    if (pveIPSet.has(d.ip) && !isMobileClient) return false;
+    return true;
+  });
+
+  function getDevScore(d) {
+    let s = 0;
+    if ((d.rxKbps || 0) > 0 || (d.txKbps || 0) > 0) s += 1000;
+    s += Math.min(500, ((d.rxBytes || 0) + (d.txBytes || 0)) / (1024 * 1024));
+    s += (d.dnsQueries || 0) * 2;
+    if (d.mac && d.mac !== '00:00:00:00:00:00') s += 50;
+    return s;
+  }
+
+  function getDevNorm(d) {
+    let raw = (d.name || d.id || '').toUpperCase();
+    if (raw.includes('(')) raw = raw.split('(')[0].trim();
+    let norm = raw.replace(/[^A-Z0-9]/g, '');
+    if (GENERIC_NAMES.has(norm) || /^\d+$/.test(norm) || norm.length < 3) return null;
+    return norm;
+  }
+
+  const dropDevIps = new Set();
+  const macGroups = {};
+  activeArp.forEach(d => {
+    if (d.mac && d.mac !== '00:00:00:00:00:00') {
+      if (!macGroups[d.mac]) macGroups[d.mac] = [];
+      macGroups[d.mac].push(d);
+    }
+  });
+  Object.values(macGroups).forEach(group => {
+    if (group.length > 1) {
+      group.sort((a, b) => getDevScore(b) - getDevScore(a));
+      group.slice(1).forEach(loser => dropDevIps.add(loser.ip));
+    }
+  });
+
+  const nameGroups = {};
+  activeArp.forEach(d => {
+    if (dropDevIps.has(d.ip)) return;
+    const norm = getDevNorm(d);
+    if (norm) {
+      if (!nameGroups[norm]) nameGroups[norm] = [];
+      nameGroups[norm].push(d);
+    }
+  });
+  Object.values(nameGroups).forEach(group => {
+    if (group.length > 1) {
+      group.sort((a, b) => getDevScore(b) - getDevScore(a));
+      group.slice(1).forEach(loser => dropDevIps.add(loser.ip));
+    }
+  });
+
+  activeArp.filter(d => !dropDevIps.has(d.ip)).forEach(d => {
     let label = (d.name || d.id).toUpperCase();
+    if (label.includes('(')) label = label.split('(')[0].trim();
     if (label.includes('IPHONE') || label.includes('IPAD') || label.includes('APPLE')) d.type = 'apple';
-    desired.push({ id:d.id, label:label, sub:d.ip, kind:d.type||'device', parent:'router', online:d.online, tRx:d.rxKbps||0, tTx:d.txKbps||0, ip:d.ip, w:180, h:50 });
+    if (label.includes('ANDROID') || label.includes('GALAXY') || label.includes('SAMSUNG')) d.type = 'android';
+
+    let subText = d.ip;
+    if (d.dnsQueries) subText += ` | ${d.dnsQueries} DNS`;
+    let wifiParent = adguardId || 'router';
+    desired.push({ id:d.id, label:label, sub:subText, kind:d.type||'device', parent:wifiParent, online:d.online, tRx:d.rxKbps||0, tTx:d.txKbps||0, ip:d.ip, dnsQueries:d.dnsQueries||0, rxBytes:d.rxBytes||0, txBytes:d.txBytes||0, w:180, h:50 });
   });
 
   desired.forEach(n => {
@@ -241,7 +321,7 @@ function applyLiveData(data) {
     nodes.forEach(n => {
       const d = desiredMap[n.id];
       if (!d) return;
-      n.tRx = d.tRx; n.tTx = d.tTx; n.online = d.online; n.label = d.label; n.sub = d.sub; n.ip = d.ip; n.cpu = d.cpu; n.memMB = d.memMB;
+      n.tRx = d.tRx; n.tTx = d.tTx; n.online = d.online; n.label = d.label; n.sub = d.sub; n.ip = d.ip; n.cpu = d.cpu; n.memMB = d.memMB; n.dnsQueries = d.dnsQueries; n.rxBytes = d.rxBytes; n.txBytes = d.txBytes;
     });
   }
 
@@ -266,134 +346,6 @@ function fmtBytes(bytes) {
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
-let currentTrafficStats = null;
-let currentTrafficPeriod = localStorage.getItem('traffic_period') || 'today';
-
-const trafficPeriodLabels = {
-  'today': 'HARI INI',
-  'week':  '7 HARI',
-  'month': 'BULAN INI',
-  'all':   'ALL-TIME'
-};
-
-function setTrafficPeriod(period) {
-  currentTrafficPeriod = period;
-  localStorage.setItem('traffic_period', period);
-  document.querySelectorAll('.traffic-pill').forEach(btn => {
-    btn.classList.toggle('active', btn.getAttribute('data-period') === period);
-  });
-  const badge = document.getElementById('traffic-badge');
-  if (badge) badge.textContent = trafficPeriodLabels[period] || 'HARI INI';
-  if (currentTrafficStats) {
-    applyTrafficView(currentTrafficStats);
-  }
-}
-
-function applyTrafficView(stats) {
-  if (!stats) return;
-  const p = stats[currentTrafficPeriod] || stats.today || stats.all;
-  if (p) {
-    const rxStr = fmtBytes(p.rx || 0);
-    const txStr = fmtBytes(p.tx || 0);
-    const el = document.getElementById('st-total');
-    if (el) el.textContent = `${rxStr} / ${txStr}`;
-  }
-  if (stats.today) {
-    const elTot = document.getElementById('tm-today-total');
-    const elRx  = document.getElementById('tm-today-rx');
-    const elTx  = document.getElementById('tm-today-tx');
-    if (elTot) elTot.textContent = fmtBytes(stats.today.total);
-    if (elRx)  elRx.textContent  = fmtBytes(stats.today.rx);
-    if (elTx)  elTx.textContent  = fmtBytes(stats.today.tx);
-  }
-  if (stats.week) {
-    const elTot = document.getElementById('tm-week-total');
-    const elRx  = document.getElementById('tm-week-rx');
-    const elTx  = document.getElementById('tm-week-tx');
-    if (elTot) elTot.textContent = fmtBytes(stats.week.total);
-    if (elRx)  elRx.textContent  = fmtBytes(stats.week.rx);
-    if (elTx)  elTx.textContent  = fmtBytes(stats.week.tx);
-  }
-  if (stats.month) {
-    const elTot = document.getElementById('tm-month-total');
-    const elRx  = document.getElementById('tm-month-rx');
-    const elTx  = document.getElementById('tm-month-tx');
-    if (elTot) elTot.textContent = fmtBytes(stats.month.total);
-    if (elRx)  elRx.textContent  = fmtBytes(stats.month.rx);
-    if (elTx)  elTx.textContent  = fmtBytes(stats.month.tx);
-  }
-  if (stats.all) {
-    const elTot = document.getElementById('tm-all-total');
-    const elRx  = document.getElementById('tm-all-rx');
-    const elTx  = document.getElementById('tm-all-tx');
-    if (elTot) elTot.textContent = fmtBytes(stats.all.total);
-    if (elRx)  elRx.textContent  = fmtBytes(stats.all.rx);
-    if (elTx)  elTx.textContent  = fmtBytes(stats.all.tx);
-  }
-}
-
-function openTrafficModal() {
-  const modal = document.getElementById('traffic-modal');
-  if (modal) modal.classList.add('open');
-  loadTrafficHistory();
-}
-
-function closeTrafficModal() {
-  const modal = document.getElementById('traffic-modal');
-  if (modal) modal.classList.remove('open');
-}
-
-function loadTrafficHistory() {
-  const statusEl = document.getElementById('tm-history-status');
-  if (statusEl) statusEl.textContent = 'Memuat...';
-  fetch('/api/traffic/history')
-    .then(r => r.json())
-    .then(data => {
-      if (statusEl) statusEl.textContent = 'Live Synced';
-      if (data && data.history) {
-        renderTrafficHistoryTable(data.history);
-      }
-    })
-    .catch(() => {
-      if (statusEl) statusEl.textContent = 'Offline';
-    });
-}
-
-function renderTrafficHistoryTable(history) {
-  const tbody = document.getElementById('tm-history-tbody');
-  if (!tbody) return;
-  if (!history || history.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:15px; color:var(--muted);">Belum ada catatan riwayat traffic.</td></tr>';
-    return;
-  }
-  let maxTotal = 1;
-  history.forEach(h => { if (h.total > maxTotal) maxTotal = h.total; });
-  
-  tbody.innerHTML = history.map(h => {
-    const rxPct = Math.round((h.rx / (h.total || 1)) * 100);
-    const txPct = 100 - rxPct;
-    const barWidth = Math.max(5, Math.round((h.total / maxTotal) * 100));
-    return `
-      <tr>
-        <td style="font-weight:600; color:#67e8f9;">${h.date}</td>
-        <td style="color:#34d399;">${fmtBytes(h.rx)}</td>
-        <td style="color:#f472b6;">${fmtBytes(h.tx)}</td>
-        <td style="font-weight:700;">${fmtBytes(h.total)}</td>
-        <td>
-          <div style="background:rgba(255,255,255,0.08); border-radius:4px; height:8px; width:100%; overflow:hidden; display:flex;">
-            <div style="background:#34d399; width:${(rxPct * barWidth) / 100}%;" title="RX: ${rxPct}%"></div>
-            <div style="background:#f472b6; width:${(txPct * barWidth) / 100}%;" title="TX: ${txPct}%"></div>
-          </div>
-        </td>
-      </tr>
-    `;
-  }).join('');
-}
-
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeTrafficModal();
-});
-
 function updateStats(data) {
   const vms = nodes.filter(n => n.parent === 'proxmox');
   const clients = nodes.filter(n => n.parent === 'router' && n.id !== 'proxmox');
@@ -401,12 +353,11 @@ function updateStats(data) {
   document.getElementById('st-clients').textContent = clients.length;
   document.getElementById('st-dl').textContent = fmtSpeed(data.hostRx || 0);
   document.getElementById('st-ul').textContent = fmtSpeed(data.hostTx || 0);
-  if (data.trafficStats) {
-    currentTrafficStats = data.trafficStats;
-    applyTrafficView(data.trafficStats);
-  } else {
-    document.getElementById('st-total').textContent = `${fmtBytes(data.hostRxBytes||0)} / ${fmtBytes(data.hostTxBytes||0)}`;
-  }
+
+  const rx = data.hostRxBytes != null ? data.hostRxBytes : (data.trafficStats && data.trafficStats.all ? data.trafficStats.all.rx : 0);
+  const tx = data.hostTxBytes != null ? data.hostTxBytes : (data.trafficStats && data.trafficStats.all ? data.trafficStats.all.tx : 0);
+  document.getElementById('st-total').textContent = `${fmtBytes(rx)} / ${fmtBytes(tx)}`;
+
   document.getElementById('st-lag').textContent = data.ts ? ((Date.now()/1000 - data.ts)).toFixed(1) + 's' : '—';
 }
 
@@ -938,7 +889,9 @@ canvas.addEventListener('pointermove', e => {
   if (hovered >= 0) {
     const n = nodes[hovered];
     document.getElementById('tip-name').textContent = n.label;
-    document.getElementById('tip-type').textContent = n.kind.toUpperCase();
+    let tipType = n.kind.toUpperCase();
+    if (n.dnsQueries) tipType += ` • ${n.dnsQueries} DNS`;
+    document.getElementById('tip-type').textContent = tipType;
     document.getElementById('tip-ip').textContent = n.ip || '—';
     document.getElementById('tip-dl').textContent = 'RX: ' + fmtSpeed(n.rx);
     document.getElementById('tip-ul').textContent = 'TX: ' + fmtSpeed(n.tx);
