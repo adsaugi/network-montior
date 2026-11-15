@@ -1,0 +1,15 @@
+[Unit]
+Description=Homelab Real-Time Topology & Network Monitor Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=xs
+WorkingDirectory=/home/xs/tailscale-dashboard
+ExecStart=/home/xs/tailscale-dashboard/venv/bin/python server.py
+Restart=always
+RestartSec=3
+EnvironmentFile=-/home/xs/tailscale-dashboard/.env
+
+[Install]
+WantedBy=multi-user.target

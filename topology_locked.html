@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <title>423 - TOPOLOGY ACCESS LOCKED (24 JAM)</title>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@700;800&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #040407;
+      color: #f59e0b;
+      font-family: 'JetBrains Mono', monospace;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .box {
+      border: 1px solid #f59e0b;
+      background: rgba(245, 158, 11, 0.05);
+      padding: 36px 30px;
+      max-width: 520px;
+      text-align: center;
+      box-shadow: 0 0 35px rgba(245, 158, 11, 0.2);
+      position: relative;
+    }
+    .tag {
+      display: inline-block;
+      border: 1px solid #f59e0b;
+      background: rgba(245, 158, 11, 0.15);
+      padding: 4px 10px;
+      font-size: 0.72rem;
+      letter-spacing: 0.12em;
+      margin-bottom: 16px;
+    }
+    h1 {
+      font-size: 1.35rem;
+      letter-spacing: 0.08em;
+      margin-bottom: 14px;
+      color: #ffffff;
+    }
+    p {
+      color: #94a3b8;
+      font-size: 0.82rem;
+      line-height: 1.7;
+      margin-bottom: 12px;
+    }
+    .ip-badge {
+      color: #38bdf8;
+      background: rgba(56,189,248,0.1);
+      padding: 2px 8px;
+      border: 1px solid rgba(56,189,248,0.3);
+    }
+    .countdown {
+      color: #f59e0b;
+      font-weight: 800;
+    }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div class="tag">[TOPOLOGY_SECURITY // IP_LOCKED]</div>
+    <h1>423 LOCKED // AKSES TERKUNCI SEMENTARA</h1>
+    <p>IP Anda: <span class="ip-badge">{{ client_ip }}</span></p>
+    <p>Akses ke Real-Time Topology terkunci sementara selama 24 jam karena salah input kode OTP Telegram 2x.</p>
+    <p>Sisa waktu terkunci: <span class="countdown">{{ time_left }}</span></p>
+    <p style="font-size: 0.72rem; color: #64748b; margin-top: 18px;">
+      KUNCI AKAN OTOMATIS TERBUKA SETELAH 24 JAM.
+    </p>
+  </div>
+</body>
+</html>

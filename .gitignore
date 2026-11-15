@@ -1,0 +1,29 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*.class
+*.so
+
+# Environments
+.env
+.env.local
+venv/
+env/
+ENV/
+
+# Logs & Runtime State
+*.log
+crash.log
+crash.log.tmp
+server.log
+.locked_ips.json
+
+# Backups & Editor configs
+*.bak
+*.swp
+*.swo
+.DS_Store
+.claude/
+.vscode/
+.idea/
+*.orig
