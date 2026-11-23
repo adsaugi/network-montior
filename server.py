@@ -1572,6 +1572,11 @@ class Handler(BaseHTTPRequestHandler):
             new_layout = req_data.get("layout", {})
             if isinstance(new_layout, dict):
                 with _lock:
+                    old_layout = state.get("layout", {})
+                    if isinstance(old_layout, dict):
+                        for reserved in ("__categories", "__defaultLayout", "__nodeNames"):
+                            if reserved not in new_layout and reserved in old_layout:
+                                new_layout[reserved] = old_layout[reserved]
                     state["layout"] = new_layout
                 save_layout(new_layout)
 
